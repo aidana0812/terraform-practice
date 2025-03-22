@@ -7,52 +7,20 @@ module "dev_vpc" {
 }
 ##############################################################################################################
 #create subnet
-module "public_subnet1" {
+module "subnets" {
   source = "./modules/subnet_module"
+  for_each = {
+    public1a  = ["10.0.0.0/18", "us-east-1a", true]
+    public1b  = ["10.0.128.0/18", "us-east-1b", true]
+    private1a = ["10.0.64.0/18", "us-east-1c", false]
+    private1b = ["10.0.192.0/18", "us-east-1d", false]
 
-  vpc_id = module.dev_vpc.aws_vpc
-  #refering to module above where created vpc,then how you named output in the module for vpc
-
-  cidr_block              = "10.0.0.0/18"
-  map_public_ip_on_launch = true
-  availability_zone       = "us-east-1a"
-  subnet_tag              = "piblic_1a"
-}
-
-module "public_subnet2" {
-  source = "./modules/subnet_module"
-
-  vpc_id = module.dev_vpc.aws_vpc
-  #refering to module above where created vpc,then how you named output in the module for vpc
-
-  cidr_block              = "10.0.128.0/18"
-  map_public_ip_on_launch = true
-  availability_zone       = "us-east-1b"
-  subnet_tag              = "piblic_2a"
-}
-
-module "private_subnet1" {
-  source = "./modules/subnet_module"
-
-  vpc_id = module.dev_vpc.aws_vpc
-  #refering to module above where created vpc,then how you named output in the module for vpc
-
-  cidr_block              = "10.0.64.0/18"
-  map_public_ip_on_launch = false
-  availability_zone       = "us-east-1c"
-  subnet_tag              = "private_1b"
-}
-
-module "private_subnet2" {
-  source = "./modules/subnet_module"
-
-  vpc_id = module.dev_vpc.aws_vpc
-  #refering to module above where created vpc,then how you named output in the module for vpc
-
-  cidr_block              = "10.0.192.0/18"
-  map_public_ip_on_launch = false
-  availability_zone       = "us-east-1d"
-  subnet_tag              = "private_2b"
+  }
+  vpc_id                  = module.dev_vpc.aws_vpc
+  cidr_block              = each.value[0]
+  availability_zone       = each.value[1]
+  map_public_ip_on_launch = each.value[2]
+  subnet_tag              = each.key
 }
 
 ##############################################################################################################
@@ -72,68 +40,43 @@ module "nat" {
   source    = "./modules/nat_module"
   vpc_id    = module.dev_vpc.aws_vpc
   eip_tag   = "my_eip"
-  subnet_id = module.public_subnet1.id
+  subnet_id = module.subnets["public1a"].id
   nat_tag   = "my_nat"
 
 }
 ##############################################################################################################
-#create route table 
-module "rtb" {
-  source  = "./modules/rtb_module"
-  vpc_id  = module.dev_vpc.aws_vpc
-  rtb_tag = "my_rtb"
-}
-#create aws_route 
-# creates a route inside route table 
-#this route sends network traffic to Internet Gateway
-# it will make public subnet to work 
-#without this, instances will not be able to communicate 
-# enables public internet access for subnet
-resource "aws_route" "aws_route" {
-  route_table_id         = module.rtb.rtb_id
-  destination_cidr_block = "0.0.0.0/0"
-  gateway_id             = module.igw.idw_id
+#create PUBLIC Route Table and Assocciation 
+module "public_rtb" {
+  source         = "./modules/rtb_module"
+  vpc_id         = module.dev_vpc.aws_vpc
+  gateway_id     = module.igw.idw_id
+  nat_gateway_id = null
+  subnets = [
+    module.subnets["public1a"].id,
+    module.subnets["public1b"].id
+  ]
 }
 
-
-# now we need to include what subnets should be in route table in order to have route from internet 
-resource "aws_route_table_association" "public_rtb_to_public1a_assoc" {
-  subnet_id      = module.public_subnet1.id
-  route_table_id = module.rtb.rtb_id
+#create PRIVATE route table and assoc 
+module "private_rtb" {
+  source         = "./modules/rtb_module"
+  vpc_id         = module.dev_vpc.aws_vpc
+  gateway_id     = null
+  nat_gateway_id = module.nat.nat_id
+  subnets = [
+    module.subnets["private1a"].id,
+    module.subnets["private1b"].id
+  ]
 }
 
-resource "aws_route_table_association" "public_rtb_to_public2a_assoc" {
-  subnet_id      = module.public_subnet2.id
-  route_table_id = module.rtb.rtb_id
-}
-
-
-#CREATE PRIVATE ROUTE TABLE 
-#create route table 
-module "rtb_private" {
-  source  = "./modules/rtb_module"
-  vpc_id  = module.dev_vpc.aws_vpc
-  rtb_tag = "my_private_rtb"
-}
 
 #create aws_route 
 resource "aws_route" "aws_route_private" {
-  route_table_id         = module.rtb_private.rtb_id
+  route_table_id         = module.private_rtb.rtb_id
   destination_cidr_block = "0.0.0.0/0"
   nat_gateway_id         = module.nat.nat_id
 }
 
-
-# now we need to include what subnets should be in route table in order to have route from internet 
-resource "aws_route_table_association" "private_rtb_to_private1a_assoc" {
-  subnet_id      = module.private_subnet1.id
-  route_table_id = module.rtb_private.rtb_id
-}
-
-resource "aws_route_table_association" "private_rtb_to_private2a_assoc" {
-  subnet_id      = module.private_subnet2.id
-  route_table_id = module.rtb_private.rtb_id
-}
 
 ##############################################################################################################
 #create security group 
@@ -194,9 +137,6 @@ data "aws_ami" "al2023" {
     values = ["available"]
   }
 }
-
-
-
 ##############################################################################################################
 #create ec2 instance 
 module "aws_instance" {
@@ -205,7 +145,7 @@ module "aws_instance" {
   ami                    = data.aws_ami.al2023.id
   vpc_security_group_ids = module.sgr.sgr_id
   key_name               = data.aws_key_pair.my_key.key_name
-  subnet_id              = module.public_subnet1.id
+  subnet_id              = module.subnets["public1a"].id
   user_data              = <<EOT
 #!/bin/bash
 dnf update -y
@@ -217,7 +157,6 @@ EOT
   tag                    = "my_ec2_public1"
 }
 
-
 #create ec2 instance 
 module "aws_instance2" {
   source                 = "./modules/ec2_module"
@@ -225,7 +164,7 @@ module "aws_instance2" {
   ami                    = data.aws_ami.al2023.id
   vpc_security_group_ids = module.sgr.sgr_id
   key_name               = data.aws_key_pair.my_key.key_name
-  subnet_id              = module.public_subnet2.id
+  subnet_id              = module.subnets["public1b"].id
   user_data              = <<EOT
 #!/bin/bash
 dnf update -y
@@ -236,7 +175,6 @@ echo "<h1>Hello, this is $(hostname -f)</h1>" > /var/www/html/index.html
 EOT
   tag                    = "my_ec2_public2"
 }
-
 
 #################################################################################################################
 #create Target Group 
@@ -288,7 +226,6 @@ resource "aws_security_group_rule" "allow_https_lb" {
   security_group_id = module.sgr_lb.sgr_id
 }
 
-
 resource "aws_security_group_rule" "allow_outbound_lb" {
   type              = "egress"
   from_port         = 0
@@ -307,9 +244,61 @@ module "lb_module" {
   load_balancer_type         = "application"
   security_groups            = [module.sgr_lb.sgr_id]
   enable_deletion_protection = false
-  subnets                    = [module.public_subnet1.id, module.public_subnet2.id]
+  subnets                    = [module.subnets["public1a"].id, module.subnets["public1b"].id]
   load_balancer_arn          = module.lb_module.lb_arn
   target_group_arn           = module.tg.tg_arn
   tag_lb                     = "my_lb"
 
+}
+
+################################################################################################################
+#create security group for MYSQL RDS 
+
+module "sgr_rds" {
+  source      = "./modules/sgr_and_rule_module"
+  name        = "rds-sgr"
+  vpc_id      = module.dev_vpc.aws_vpc
+  description = "rds-sgr"
+
+  sg_rules = {
+    "mysql_aurora"  = ["ingress", 3306, 3306, "tcp", module.sgr.sgr_id]
+    "outbound_rule" = ["egress", 0, 0, "-1", "0.0.0.0/0"]
+  }
+
+}
+
+#create subnet group for RDS 
+module "db_subnet_gr" {
+  source     = "./modules/rds_subnet_group_module"
+  name       = "db_subnet_group"
+  subnet_ids = [module.subnets["private1a"].id, module.subnets["private1b"].id]
+  tag        = "db_subnet_group"
+
+}
+
+#create RDS instance 
+module "rds_instance" {
+  source            = "./modules/rds_instance_module"
+  allocated_storage = 20
+  engine            = "mysql"
+  engine_version    = "5.7.44"
+  name              = "secret_db"
+  instance_class    = "db.t3.micro"
+  username          = local.credential.USERNAME
+  password          = local.credential.PASSWORD
+  # with the help of secret manager and data call, we can safely store our credentials in AWS secret Manager 
+  # BUT credentials will be still in state file -- that's why it is IMPORTANT to securely and propely store state file 
+
+  vpc_security_group_ids = [module.sgr_rds.sgr_id]
+  db_subnet_group_name   = module.db_subnet_gr.db_subnet_id
+}
+
+data "aws_secretsmanager_secret_version" "credential" {
+  secret_id = "rds.credentials"
+}
+
+
+#will use data call for secret manager and convert (decode) it from Json format to a plain text format 
+locals {
+  credential = jsondecode(data.aws_secretsmanager_secret_version.credential.secret_string)
 }
